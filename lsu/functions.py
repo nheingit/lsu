@@ -18,31 +18,37 @@ def python_math_execution(math_string):
 
 functions = [
     {
-        "name": "svg_to_png_bytes",
-        "description": "Generate a PNG from an SVG",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "svg_string": {
-                    "type": "string",
-                    "description": "A fully formed SVG element in the form of a string",
+        "type": "function",
+        "function": {
+            "name": "svg_to_png_bytes",
+            "description": "Generate a PNG from an SVG",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "svg_string": {
+                        "type": "string",
+                        "description": "A fully formed SVG element in the form of a string",
+                    },
                 },
+                "required": ["svg_string"],
             },
-            "required": ["svg_string"],
         },
     },
     {
-        "name": "python_math_execution",
-        "description": "Solve a math problem using python code",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "math_string": {
-                    "type": "string",
-                    "description": "A string that solves a math problem that conforms with python syntax that could be passed directly to an eval() function",
+        "type": "function",
+        "function": {
+            "name": "python_math_execution",
+            "description": "Solve a math problem using python code",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "math_string": {
+                        "type": "string",
+                        "description": "A string that solves a math problem that conforms with python syntax that could be passed directly to an eval() function",
+                    },
                 },
+                "required": ["math_string"],
             },
-            "required": ["math_string"],
         },
     },
 ]
@@ -51,7 +57,6 @@ functions = [
 def run_function(name: str, args: dict):
     if name == "svg_to_png_bytes":
         return svg_to_png_bytes(args["svg_string"])
-    elif name == "python_math_execution":
+    if name == "python_math_execution":
         return python_math_execution(args["math_string"])
-    else:
-        return None
+    return None

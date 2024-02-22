@@ -21,9 +21,8 @@ CairoSVG = "^2.7.0"
 replicate = "^0.15.4"
 openai = "^1.12.0"
 requests = "^2.31.0"
-python-telegram-bot = "^20.8"
-telegram = "^0.0.1"
 python-dotenv = "^1.0.1"
+python-telegram-bot = "^20.8"
 
 
 [build-system]

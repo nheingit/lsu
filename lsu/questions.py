@@ -3,12 +3,18 @@ from typing import List
 
 import numpy as np
 import pandas as pd
+from dotenv import load_dotenv
 from openai import OpenAI
 from scipy import spatial
 
-openai = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+load_dotenv()
 
-df = pd.read_csv("processed/embeddings.csv", index_col=0)
+openai = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+current_script_path = os.path.abspath(__file__)
+current_dir = os.path.dirname(current_script_path)
+embeddings_csv_path = os.path.join(current_dir, "processed", "embeddings.csv")
+df = pd.read_csv(embeddings_csv_path, index_col=0)
 df["embeddings"] = df["embeddings"].apply(eval).apply(np.array)
 
 
@@ -107,6 +113,9 @@ def answer_question(
             frequency_penalty=0,
             presence_penalty=0,
             stop=stop_sequence,
+        )
+        print(
+            f"I want you to Answer the question, and use the context below to help answer the question, and if the question can't be answered based on the context,say 'i don't know'.\".\n\nContext: {context}\n\n---\n\nQuestion: {question}\nSource:\nAnswer:",
         )
         return response.choices[0].message.content
     except Exception as e:
