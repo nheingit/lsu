@@ -92,14 +92,29 @@ messages = [
 ]
 
 # Assistants begin
+
+current_dir = os.path.dirname(os.path.abspath(__file__))
+scraped_csv_path = os.path.join(current_dir, "processed", "scraped.csv")
+
+mdn_scrape_file = openai.files.create(
+    file=open(scraped_csv_path, "rb"), purpose="assistants"
+)
 assistant = openai.beta.assistants.create(
     name="Telegram Bot",
     instructions=CODE_PROMPT,
-    tools=[{"type": "code_interpreter"}],
-    model="gpt-4-turbo-preview",
+    tools=[
+        {"type": "code_interpreter"},
+        {"type": "retrieval"},
+        {"type": "function", "function": functions[0]},
+        {"type": "function", "function": functions[1]},
+    ],
+    model="gpt-4-0125-preview",
+    file_ids=[
+        mdn_scrape_file.id,
+    ],
 )
 # ---
-thread = openai.beta.threads.create()
+THREAD = openai.beta.threads.create()
 
 
 def generate_prompt(messages):
@@ -108,12 +123,6 @@ def generate_prompt(messages):
         for message in messages
     )
 
-
-def show_json(obj):
-    print(json.loads(obj.model_dump_json()))
-
-
-message_history = []
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
@@ -133,17 +142,6 @@ async def mozilla(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(chat_id=update.effective_chat.id, text=answer)
 
 
-async def image(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    response = openai.images.generate(
-        prompt=update.message.text, model="dall-e-3", n=1, size="1024x1024"
-    )
-    image_url = response.data[0].url
-    image_response = requests.get(image_url)
-    await context.bot.send_photo(
-        chat_id=update.effective_chat.id, photo=image_response.content
-    )
-
-
 async def transcribe_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Safety Check
     voice_id = update.message.voice.file_id
@@ -155,7 +153,53 @@ async def transcribe_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
         transcript = openai.audio.transcriptions.create(
             model="whisper-1", file=audio_file
         )
-        await update.message.reply_text(f"Transcript finished:\n {transcript['text']}")
+        message = openai.beta.threads.messages.create(
+            thread_id=THREAD.id, role="user", content=transcript.text
+        )
+        run = openai.beta.threads.runs.create(
+            thread_id=THREAD.id, assistant_id=assistant.id
+        )
+        await update.message.reply_text(
+            f"Transcript finished:\n {transcript.text}\n processing request"
+        )
+        run = wait_on_run(run, THREAD)
+        # if we did a function call, run the function and update the thread's state
+        if run.status == "requires_action":
+            print(run.required_action.submit_tool_outputs.tool_calls)
+            tool_call = run.required_action.submit_tool_outputs.tool_calls[0]
+            name = tool_call.function.name
+            args = json.loads(tool_call.function.arguments)
+            response = run_function(name, args)
+            if name in ("svg_to_png_bytes"):
+                await context.bot.send_photo(
+                    chat_id=update.effective_chat.id, photo=response
+                )
+            if name in ("generate_image"):
+                await context.bot.send_photo(
+                    chat_id=update.effective_chat.id, photo=response.content
+                )
+                run = openai.beta.threads.runs.cancel(
+                    thread_id=THREAD.id, run_id=run.id
+                )
+                run = wait_on_run(run, THREAD)
+                return
+            run = openai.beta.threads.runs.submit_tool_outputs(
+                thread_id=THREAD.id,
+                run_id=run.id,
+                tool_outputs=[
+                    {"tool_call_id": tool_call.id, "output": json.dumps(str(response))}
+                ],
+            )
+            run = wait_on_run(run, THREAD)
+        # Retrieve the message object
+        messages = openai.beta.threads.messages.list(
+            thread_id=THREAD.id, order="asc", after=message.id
+        )
+        # Extract the message content
+        message_content = messages.data[0].content[0].text
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id, text=message_content.value
+        )
 
 
 # Asynchronous function to handle chat interactions
@@ -243,27 +287,66 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 #   message_history.append({"isUser": False, "text": human_readable_output})
 
 
-async def assistant_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    print("HELLO I'M HERE ACTIVATING")
-    message = openai.beta.threads.messages.create(
-        thread_id=thread.id, role="user", content=update.message.text
-    )
-    run = openai.beta.threads.runs.create(
-        thread_id=thread.id, assistant_id=assistant.id
-    )
+def wait_on_run(run, thread):
     while run.status == "queued" or run.status == "in_progress":
+        print(run.status)
         run = openai.beta.threads.runs.retrieve(
             thread_id=thread.id,
             run_id=run.id,
         )
         time.sleep(0.5)
-    messages = openai.beta.threads.messages.list(
-        thread_id=thread.id, order="asc", after=message.id
+    return run
+
+
+def pretty_print(messages):
+    print("# Messages")
+    for m in messages:
+        print(f"{m.role}: {m.content[0].text.value}")
+    print()
+
+
+async def assistant_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = openai.beta.threads.messages.create(
+        thread_id=THREAD.id, role="user", content=update.message.text
     )
-    thing = json.loads(messages.model_dump_json())
-    assistant_answer = thing["data"][0]["content"][0]["text"]["value"]
+    run = openai.beta.threads.runs.create(
+        thread_id=THREAD.id, assistant_id=assistant.id
+    )
+    run = wait_on_run(run, THREAD)
+    # if we did a function call, run the function and update the thread's state
+    if run.status == "requires_action":
+        print(run.required_action.submit_tool_outputs.tool_calls)
+        tool_call = run.required_action.submit_tool_outputs.tool_calls[0]
+        name = tool_call.function.name
+        args = json.loads(tool_call.function.arguments)
+        response = run_function(name, args)
+        if name in ("svg_to_png_bytes"):
+            await context.bot.send_photo(
+                chat_id=update.effective_chat.id, photo=response
+            )
+        if name in ("generate_image"):
+            await context.bot.send_photo(
+                chat_id=update.effective_chat.id, photo=response.content
+            )
+            run = openai.beta.threads.runs.cancel(thread_id=THREAD.id, run_id=run.id)
+            run = wait_on_run(run, THREAD)
+            return
+        run = openai.beta.threads.runs.submit_tool_outputs(
+            thread_id=THREAD.id,
+            run_id=run.id,
+            tool_outputs=[
+                {"tool_call_id": tool_call.id, "output": json.dumps(str(response))}
+            ],
+        )
+        run = wait_on_run(run, THREAD)
+    # Retrieve the message object
+    messages = openai.beta.threads.messages.list(
+        thread_id=THREAD.id, order="asc", after=message.id
+    )
+    # Extract the message content
+    message_content = messages.data[0].content[0].text
     await context.bot.send_message(
-        chat_id=update.effective_chat.id, text=assistant_answer
+        chat_id=update.effective_chat.id, text=message_content.value
     )
 
 
@@ -272,7 +355,6 @@ if __name__ == "__main__":
 
     start_handler = CommandHandler("start", start)
     mozilla_handler = CommandHandler("mozilla", mozilla)
-    image_handler = CommandHandler("image", image)
     # chat_handler = MessageHandler(filters.TEXT & (~filters.COMMAND), chat)
     chat_handler = MessageHandler(filters.TEXT & (~filters.COMMAND), assistant_chat)
     # chat_handler_2 = MessageHandler(filters.TEXT & (~filters.COMMAND), chat2)
@@ -282,7 +364,6 @@ if __name__ == "__main__":
     # application.add_handler(chat_handler)
     application.add_handler(chat_handler)
     application.add_handler(voice_handler)
-    application.add_handler(image_handler)
     application.add_handler(mozilla_handler)
     application.add_handler(start_handler)
 
