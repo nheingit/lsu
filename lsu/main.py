@@ -2,11 +2,11 @@ import datetime
 import json
 import logging
 import os
+import time
 
 import numpy as np
 import pandas as pd
 import requests
-from dotenv import load_dotenv
 from functions import functions, run_function
 from openai import OpenAI
 from questions import answer_question
@@ -19,8 +19,6 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
-
-load_dotenv()
 
 CODE_PROMPT = """
 Here are two input:output examples for code generation. Please use these and follow the styling for future requests that you think are pertinent to the request. Make sure All HTML is generated with the JSX flavoring.
@@ -72,23 +70,18 @@ Here are two input:output examples for code generation. Please use these and fol
   Click Me
 </button>
 """
-BEARER_TOKEN = os.getenv("BEARER_TOKEN")
-tg_bot_token = os.getenv("TG_BOT_TOKEN")
-replicate_token = os.getenv("REPLICATE_API_TOKEN")
+tg_bot_token = os.environ["TG_BOT_TOKEN"]
+replicate_token = os.environ["REPLICATE_API_TOKEN"]
 client = Client(api_token=replicate_token)
 model = client.models.get("meta/llama-2-70b-chat")
 version = model.versions.get(
     "2c1608e18606fad2812020dc541930f2d0495ce32eee50074220b87300bc16e1"
 )
 
-current_script_path = os.path.abspath(__file__)
-current_dir = os.path.dirname(current_script_path)
-embeddings_csv_path = os.path.join(current_dir, "processed", "embeddings.csv")
-df = pd.read_csv(embeddings_csv_path, index_col=0)
-df["embeddings"] = df["embeddings"].apply(eval).apply(np.array)
+# df = pd.read_csv("processed/embeddings.csv", index_col=0)
+# df["embeddings"] = df["embeddings"].apply(eval).apply(np.array)
 
-
-openai = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+openai = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 
 messages = [
     {
@@ -98,12 +91,26 @@ messages = [
     {"role": "system", "content": CODE_PROMPT},
 ]
 
+# Assistants begin
+assistant = openai.beta.assistants.create(
+    name="Telegram Bot",
+    instructions=CODE_PROMPT,
+    tools=[{"type": "code_interpreter"}],
+    model="gpt-4-turbo-preview",
+)
+# ---
+thread = openai.beta.threads.create()
+
 
 def generate_prompt(messages):
     return "\n".join(
         f"[INST] {message['text']} [/INST]" if message["isUser"] else message["text"]
         for message in messages
     )
+
+
+def show_json(obj):
+    print(json.loads(obj.model_dump_json()))
 
 
 message_history = []
@@ -148,7 +155,7 @@ async def transcribe_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
         transcript = openai.audio.transcriptions.create(
             model="whisper-1", file=audio_file
         )
-        await update.message.reply_text(f"Transcript finished:\n {transcript.text}")
+        await update.message.reply_text(f"Transcript finished:\n {transcript['text']}")
 
 
 # Asynchronous function to handle chat interactions
@@ -158,18 +165,16 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Generate an initial response using GPT-3.5 model
     initial_response = openai.chat.completions.create(
-        model="gpt-3.5-turbo", messages=messages, tools=functions, tool_choice="auto"
+        model="gpt-3.5-turbo", messages=messages, functions=functions
     )
-    initial_response_message = initial_response.choices[0].message
+    initial_response_message = initial_response.choices[0].message.content
     final_response = None
 
     # Check if the initial response contains a function call
-    if initial_response.choices[0].message.tool_calls:
+    if initial_response_message and initial_response_message.get("function_call"):
         # Extract the function name and arguments
-        name = initial_response.choices[0].message.tool_calls[0].function.name
-        args = json.loads(
-            initial_response.choices[0].message.tool_calls[0].function.arguments
-        )
+        name = initial_response_message.function_call.name
+        args = json.loads(initial_response_message.function_call.arguments)
 
         # Run the corresponding function
         function_response = run_function(name, args)
@@ -182,28 +187,25 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         # Generate the final response
-        initial_response_message.content = str(
-            initial_response_message.tool_calls[0].function
+        final_response = openai.chat.completions.create(
+            model="gpt-3.5-turbo-0613",
+            messages=[
+                *messages,
+                initial_response_message,
+                {
+                    "role": "function",
+                    "name": initial_response_message["function_call"]["name"],
+                    "content": json.dumps(function_response),
+                },
+            ],
         )
-        messages.append(
-            {
-                "role": initial_response_message.role,
-                "content": initial_response_message.content,
-            }
-        )
-        messages.append(
-            {
-                "role": "function",
-                "tool_call_id": initial_response_message.tool_calls[0].id,
-                "name": name,
-                "content": json.dumps(function_response),
-            }
-        )
-        for message in messages:
-            print(message)
-        if True:
+        final_answer = final_response.choices[0].message.content
+
+        # Send the final response if it exists
+        if final_answer:
+            messages.append({"role": "assistant", "content": final_answer})
             await context.bot.send_message(
-                chat_id=update.effective_chat.id, text=function_response
+                chat_id=update.effective_chat.id, text=final_answer
             )
         else:
             # Send an error message if something went wrong
@@ -213,11 +215,9 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
     else:
         # If no function call, send the initial response
-        messages.append(
-            {"role": "assistant", "content": initial_response_message.content}
-        )
+        messages.append(initial_response_message)
         await context.bot.send_message(
-            chat_id=update.effective_chat.id, text=initial_response_message.content
+            chat_id=update.effective_chat.id, text=initial_response_message["content"]
         )
     await context.bot.send_message(
         chat_id=update.effective_chat.id, text="I'm a bot, please talk to me!"
@@ -242,13 +242,39 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 #   #Add AI Message
 #   message_history.append({"isUser": False, "text": human_readable_output})
 
+
+async def assistant_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    print("HELLO I'M HERE ACTIVATING")
+    message = openai.beta.threads.messages.create(
+        thread_id=thread.id, role="user", content=update.message.text
+    )
+    run = openai.beta.threads.runs.create(
+        thread_id=thread.id, assistant_id=assistant.id
+    )
+    while run.status == "queued" or run.status == "in_progress":
+        run = openai.beta.threads.runs.retrieve(
+            thread_id=thread.id,
+            run_id=run.id,
+        )
+        time.sleep(0.5)
+    messages = openai.beta.threads.messages.list(
+        thread_id=thread.id, order="asc", after=message.id
+    )
+    thing = json.loads(messages.model_dump_json())
+    assistant_answer = thing["data"][0]["content"][0]["text"]["value"]
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id, text=assistant_answer
+    )
+
+
 if __name__ == "__main__":
     application = ApplicationBuilder().token(tg_bot_token).build()
 
     start_handler = CommandHandler("start", start)
     mozilla_handler = CommandHandler("mozilla", mozilla)
     image_handler = CommandHandler("image", image)
-    chat_handler = MessageHandler(filters.TEXT & (~filters.COMMAND), chat)
+    # chat_handler = MessageHandler(filters.TEXT & (~filters.COMMAND), chat)
+    chat_handler = MessageHandler(filters.TEXT & (~filters.COMMAND), assistant_chat)
     # chat_handler_2 = MessageHandler(filters.TEXT & (~filters.COMMAND), chat2)
     # This handler will be triggered for voice messages
     voice_handler = MessageHandler(filters.VOICE, transcribe_message)
